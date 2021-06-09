@@ -313,16 +313,10 @@ make_bounce_fn(Byte *mem, void *target_fn, BncArg const args[], Size args_n)
         /* regs */ Loc_reg, Loc_xmm,
         /* stack*/ Loc_mem, Loc_mem,
     };
-    persist BncSrcLoc const Imm_Locs[2/*stack*/][2/*size*/][2/*float*/] = {
-        //          scalar   float
-        { // regs
-            /* 4 */ Src__U8, Src__F4,
-            /* 8 */ Src__U8, Src__F8, // only worth dealing with floats specially when they're going into XMM registers
-        },
-        { // stack
-            /* 4 */ Src__U8, Src__U8,
-            /* 8 */ Src__U8, Src__U8,
-        }
+    persist BncSrcLoc const Imm_Locs[2/*size*/][2/*float*/] = {
+        //      scalar   float
+        /* 4 */ Src__U8, Src__F4,
+        /* 8 */ Src__U8, Src__F8, // only worth dealing with floats specially when they're going into XMM registers
     };
 
     BncFn result = { .data = mem };
@@ -394,7 +388,7 @@ make_bounce_fn(Byte *mem, void *target_fn, BncArg const args[], Size args_n)
         {
             assert(arg_size <= 8, "unhandled arg size: %u", arg_size);
             assert(!is_float || arg_size == 4 || arg_size == 8, "unhandled float size: %u", arg_size);
-            src = Imm_Locs[dst_fn_arg_i >= 4][arg_size/4 - 1][is_float];
+            src = Imm_Locs[arg_size != 4][is_float];
         }
         else
         {   src = Arg_Locs[src_fn_arg_i-- >= 4][is_float];   }
