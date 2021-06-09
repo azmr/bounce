@@ -36,11 +36,11 @@ typedef enum BncTag {
 
 typedef union  { void *ptr; U8 rU8; U4 rU4; S8 rS8; F4 xF4; F8 xF8; BncReg reg; } BncVal;
 typedef struct { BncTag tag; union{ BncVal; BncVal val; }; } BncArg; // tag contains size
-typedef struct { void *fn; U4 data_size, fn_size; } BncFn;
+typedef struct { void *fn, *data; U4 size; } BncFn; // size includes both fn & data
 
-internal inline U4    bnc_mem_size(BncFn const *bnc) { return bnc->data_size  + bnc->fn_size;   } // total allocation size
-internal inline void *bnc_mem_base(BncFn const *bnc) { return (Byte *)bnc->fn - bnc->data_size; } // the memory address you'd free
-internal inline void *bnc_mem_end(BncFn const *bnc)  { return (Byte *)bnc->fn + bnc->fn_size;   } // after last valid byte
+internal inline U4    bnc_data_size(BncFn const *bnc) { return (Byte*)bnc->fn  - (Byte*)bnc->data;   }
+internal inline U4    bnc_fn_size(BncFn const *bnc)   { return bnc->size       - bnc_data_size(bnc); }
+internal inline void *bnc_mem_end(BncFn const *bnc)   { return (Byte *)bnc->fn + bnc_fn_size(bnc);   } // after last valid byte
 
 internal inline BncArg bnc_copy(void *v, U4 size)
 {
@@ -247,7 +247,7 @@ internal inline Size add_rsp(Byte **cur, Size size)
 internal inline Size jmp_fn(Byte **cur, void *fn)
 {
     Size mc_size = mov_reg_imm(cur, Bnc_ax, (BncVal){.ptr=fn}, 0); // mov rax, fn
-    if (cur)
+    if (*cur)
     {   cur[0][0]=0xff, cur[0][1]=0xe0; *cur += 2;   } // jmp rax
     return mc_size + 2;
 }
@@ -255,7 +255,7 @@ internal inline Size jmp_fn(Byte **cur, void *fn)
 internal inline Size call_fn(Byte **cur, void *fn)
 {
     Size mc_size = mov_reg_imm(cur, Bnc_ax, (BncVal){.ptr=fn}, 0); // mov rax, fn
-    if (cur)
+    if (*cur)
     {   cur[0][0]=0xff, cur[0][1]=0xd0; *cur += 2;   } // call rax
     return mc_size + 2;
 }
@@ -304,7 +304,7 @@ make_bounce_fn(Byte *mem, void *target_fn, BncArg const args[], Size args_n)
     typedef enum { Dst_null, Dst_reg,     Dst_xmm,     Dst_mem,                                              Dst_Count } BncDstLoc;
     typedef enum { Src_null, Src_reg,     Src_xmm,     Src_mem,     Src__U8,     Src__F4,     Src__F8,       Src_Count } BncSrcLoc;
     persist BncMovFn * const Movs[Dst_Count][Src_Count] = {
-        [Dst_reg]={ 0,       mov_reg_reg, 0,           0,           mov_reg_imm, },
+        [Dst_reg]={ 0,       mov_reg_reg, 0,           0,           mov_reg_imm,                          },
         [Dst_xmm]={ 0,       0,           mov_xmm_xmm, 0,           0,           mov_xmm_F4,  mov_xmm_F8  },
         [Dst_mem]={ 0,       mov_mem_reg, mov_mem_xmm, mov_mem_mem, mov_mem_imm, mov_mem_imm, mov_mem_imm },
     };
@@ -325,8 +325,8 @@ make_bounce_fn(Byte *mem, void *target_fn, BncArg const args[], Size args_n)
         }
     };
 
-    Byte *data   = mem;
-    BncFn result = {0};
+    BncFn result = { .data = mem };
+    U4 mc_size = 0, data_size = 0, data_used = 0;
 
     Size gen_fn_args_n = 0;
     for (Size i = args_n; i-- > 0;)
@@ -336,24 +336,23 @@ make_bounce_fn(Byte *mem, void *target_fn, BncArg const args[], Size args_n)
         if (arg.tag & Bnc_copy)
         { // determine the space needed before the code for copied data
             U4 arg_size = (arg.tag & Bnc_size_mask);
-            result.data_size = bnc_align_up_offset(data, result.data_size, arg_size) + arg_size;
+            data_size = bnc_align_up_offset(result.data, data_size, arg_size) + arg_size;
         }
     }
     Size src_fn_arg_i = gen_fn_args_n - 1;
 
-    Byte *cur = (mem ? mem + result.data_size : 0); // make space for data before the executable
+    Byte *cur = (mem ? mem + data_size : 0); // make space for data before the executable
     result.fn = cur;
 
     Size rsp_d = 0;
     if (args_n > 4)
     {
-        rsp_d           = args_n - gen_fn_args_n;
-        rsp_d           = (rsp_d + rsp_d & 1) * sizeof(void*); // rsp 16 byte align
-        result.fn_size += sub_rsp(&cur, rsp_d);
-        result.fn_size += mov_mem_mem(&cur, 0, (BncVal){.reg=rsp_d}, Bnc_ax); // move the return address to rsp
+        rsp_d    = args_n - gen_fn_args_n;
+        rsp_d    = (rsp_d + rsp_d & 1) * sizeof(void*); // rsp 16 byte align
+        mc_size += sub_rsp(&cur, rsp_d);
+        mc_size += mov_mem_mem(&cur, 0, (BncVal){.reg=rsp_d}, Bnc_ax); // move the return address to rsp
     }
 
-    U4 data_used = 0;
 
     // NOTE: need to make sure we don't clobber args before we use them elsewhere
     for (Size dst_fn_arg_i = args_n; dst_fn_arg_i-- > 0;)
@@ -365,9 +364,9 @@ make_bounce_fn(Byte *mem, void *target_fn, BncArg const args[], Size args_n)
         // COPY CACHED DATA ////////////////////////////////////////////////////////////
         if (arg.tag & Bnc_copy) // NOTE: this has to be done before using the arg's val
         { // push some data and pass a pointer to it
-            data_used = bnc_align_up_offset(data, data_used, arg_size);
+            data_used = bnc_align_up_offset(result.data, data_used, arg_size);
             if (cur)
-            {   arg.ptr = memcpy(&data[data_used], arg.ptr, arg_size);   }
+            {   arg.ptr = memcpy(&result.data[data_used], arg.ptr, arg_size);   }
             data_used += arg_size;
             arg_size  = sizeof(void*);
         }
@@ -379,8 +378,8 @@ make_bounce_fn(Byte *mem, void *target_fn, BncArg const args[], Size args_n)
             [Dst_mem] = 8*dst_fn_arg_i,
         };
         BncVal const srcs[Src_Count] = {
-            [Src_reg] = { .rU4 = Arg_I_Regs[src_fn_arg_i] },
-            [Src_xmm] = { .rU4 = src_fn_arg_i },
+            [Src_reg] = { .reg = Arg_I_Regs[src_fn_arg_i] },
+            [Src_xmm] = { .reg = src_fn_arg_i },
             [Src_mem] = { .rU4 = 8*src_fn_arg_i },
             [Src__U8] = arg.val,
             [Src__F4] = arg.val,
@@ -402,21 +401,22 @@ make_bounce_fn(Byte *mem, void *target_fn, BncArg const args[], Size args_n)
 
         // MOV AS APPROPRIATE //////////////////////////////////////////////////////////
         assert(dst && src);
-        result.fn_size += Movs[dst][src](&cur, dsts[dst], srcs[src], Bnc_ax); // NOTE: ax is only used in mem_mem, where it's the tmp register
+        mc_size += Movs[dst][src](&cur, dsts[dst], srcs[src], Bnc_ax); // NOTE: ax is only used in mem_mem, where it's the tmp register
     }
 
     if (args_n > 4)
     { // NOTE: we have changed rsp, so we need control to return here to reset it
-        result.fn_size += call_fn(&cur, target_fn);
-        result.fn_size += mov_mem_mem(&cur, rsp_d, (BncVal){0}, Bnc_r11); // replace the return address // would it be better to just jmp to it?
-        result.fn_size += add_rsp(&cur, rsp_d);
-        result.fn_size += ret(&cur);
+        mc_size += call_fn(&cur, target_fn);
+        mc_size += mov_mem_mem(&cur, rsp_d, (BncVal){0}, Bnc_r11); // replace the return address // would it be better to just jmp to it?
+        mc_size += add_rsp(&cur, rsp_d);
+        mc_size += ret(&cur);
     }
     else
-    {   result.fn_size += jmp_fn(&cur, target_fn);   }
+    {   mc_size += jmp_fn(&cur, target_fn);   }
 
+    result.size = data_size + mc_size;
     assert(!result.fn ||
-           (cur == (mem + result.data_size + result.fn_size)), "not calculating the pushed size correctly");
+           (cur == (mem + result.size)), "not calculating the pushed size correctly");
     return result; // if we were passed a NULL, return the size, otherwise add nothing & return the start of the trampoline
 }
 
