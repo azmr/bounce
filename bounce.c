@@ -36,6 +36,11 @@ typedef enum BncTag {
 
 typedef union  { void *ptr; U8 rU8; U4 rU4; S8 rS8; F4 xF4; F8 xF8; BncReg reg; } BncVal;
 typedef struct { BncTag tag; union{ BncVal; BncVal val; }; } BncArg; // tag contains size
+typedef struct { void *fn; U4 data_size, fn_size; } BncFn;
+
+internal inline U4    bnc_mem_size(BncFn const *bnc) { return bnc->data_size  + bnc->fn_size;   } // total allocation size
+internal inline void *bnc_mem_base(BncFn const *bnc) { return (Byte *)bnc->fn - bnc->data_size; } // the memory address you'd free
+internal inline void *bnc_mem_end(BncFn const *bnc)  { return (Byte *)bnc->fn + bnc->fn_size;   } // after last valid byte
 
 internal inline BncArg bnc_copy(void *v, U4 size)
 {
@@ -264,7 +269,7 @@ internal inline Size ret(Byte **cur)
 #endif // MACHINE CODE
 
 static inline U1
-spec_ceil_pow2_U1(U1 v)
+bnc_ceil_pow2_U1(U1 v)
 {
     v--;
     v |= v >> 1;
@@ -273,9 +278,9 @@ spec_ceil_pow2_U1(U1 v)
     v++;
     return v;
 }
-internal inline UPtr spec_align_up_offset(Byte *base, UPtr offset, UPtr size)
+internal inline UPtr bnc_align_up_offset(Byte *base, UPtr offset, UPtr size)
 {
-    Size align = size >= 16 ? 16 : spec_ceil_pow2_U1((U1)size);
+    Size align = size >= 16 ? 16 : bnc_ceil_pow2_U1((U1)size);
     assert(is_pow_2(align));
     --align;
     UPtr new_base = (UPtr)(base + offset + align) & ~align;
@@ -288,13 +293,13 @@ internal inline UPtr spec_align_up_offset(Byte *base, UPtr offset, UPtr size)
 // if exe is null, cast the result to UPtr to get the size needed // TODO: or
 // NOTE: the number & ordering of args corresponds to those in the target (not generated) function
 // TODO: rename? trampoline? bounce? spring? preset_fn_args
-internal void *
-specialize(Byte *mem, void *fn, BncArg const args[], Size args_n)
+internal BncFn
+make_bounce_fn(Byte *mem, void *target_fn, BncArg const args[], Size args_n)
 {
 #define assume_args_are_sorted
     persist const BncReg Arg_I_Regs[] = { Bnc_cx, Bnc_dx, Bnc_r8, Bnc_r9, };
-    typedef Size BncMovFn(Byte **, int, BncVal, int);
 
+    typedef Size BncMovFn(Byte **, int, BncVal, int);
     enum         { Loc_null, Loc_reg,     Loc_xmm,     Loc_mem,                                              Loc_Count };
     typedef enum { Dst_null, Dst_reg,     Dst_xmm,     Dst_mem,                                              Dst_Count } BncDstLoc;
     typedef enum { Src_null, Src_reg,     Src_xmm,     Src_mem,     Src__U8,     Src__F4,     Src__F8,       Src_Count } BncSrcLoc;
@@ -320,10 +325,8 @@ specialize(Byte *mem, void *fn, BncArg const args[], Size args_n)
         }
     };
 
-    Byte *data      = mem;
-    Size  mc_size   = 0,
-          data_size = 0,
-          data_used = 0;
+    Byte *data   = mem;
+    BncFn result = {0};
 
     Size gen_fn_args_n = 0;
     for (Size i = args_n; i-- > 0;)
@@ -333,23 +336,24 @@ specialize(Byte *mem, void *fn, BncArg const args[], Size args_n)
         if (arg.tag & Bnc_copy)
         { // determine the space needed before the code for copied data
             U4 arg_size = (arg.tag & Bnc_size_mask);
-            data_size   = spec_align_up_offset(data, data_size, arg_size) + arg_size;
+            result.data_size = bnc_align_up_offset(data, result.data_size, arg_size) + arg_size;
         }
     }
     Size src_fn_arg_i = gen_fn_args_n - 1;
 
-    Byte *exe = (mem ? mem + data_size : 0); // make space for data before the executable
-    Byte *cur = exe;
+    Byte *cur = (mem ? mem + result.data_size : 0); // make space for data before the executable
+    result.fn = cur;
 
     Size rsp_d = 0;
     if (args_n > 4)
     {
-        rsp_d    = args_n - gen_fn_args_n;
-        rsp_d    = (rsp_d + rsp_d & 1) * sizeof(void*); // rsp 16 byte align
-        mc_size += sub_rsp(&cur, rsp_d);
-        mc_size += mov_mem_mem(&cur, 0, (BncVal){.reg=rsp_d}, Bnc_ax); // move the return address to rsp
+        rsp_d           = args_n - gen_fn_args_n;
+        rsp_d           = (rsp_d + rsp_d & 1) * sizeof(void*); // rsp 16 byte align
+        result.fn_size += sub_rsp(&cur, rsp_d);
+        result.fn_size += mov_mem_mem(&cur, 0, (BncVal){.reg=rsp_d}, Bnc_ax); // move the return address to rsp
     }
 
+    U4 data_used = 0;
 
     // NOTE: need to make sure we don't clobber args before we use them elsewhere
     for (Size dst_fn_arg_i = args_n; dst_fn_arg_i-- > 0;)
@@ -361,7 +365,7 @@ specialize(Byte *mem, void *fn, BncArg const args[], Size args_n)
         // COPY CACHED DATA ////////////////////////////////////////////////////////////
         if (arg.tag & Bnc_copy) // NOTE: this has to be done before using the arg's val
         { // push some data and pass a pointer to it
-            data_used = spec_align_up_offset(data, data_used, arg_size);
+            data_used = bnc_align_up_offset(data, data_used, arg_size);
             if (cur)
             {   arg.ptr = memcpy(&data[data_used], arg.ptr, arg_size);   }
             data_used += arg_size;
@@ -398,21 +402,22 @@ specialize(Byte *mem, void *fn, BncArg const args[], Size args_n)
 
         // MOV AS APPROPRIATE //////////////////////////////////////////////////////////
         assert(dst && src);
-        mc_size += Movs[dst][src](&cur, dsts[dst], srcs[src], Bnc_ax); // NOTE: ax is only used in mem_mem, where it's the tmp register
+        result.fn_size += Movs[dst][src](&cur, dsts[dst], srcs[src], Bnc_ax); // NOTE: ax is only used in mem_mem, where it's the tmp register
     }
 
     if (args_n > 4)
     { // NOTE: we have changed rsp, so we need control to return here to reset it
-        mc_size += call_fn(&cur, fn);
-        mc_size += mov_mem_mem(&cur, rsp_d, (BncVal){0}, Bnc_r11); // replace the return address // would it be better to just jmp to it?
-        mc_size += add_rsp(&cur, rsp_d);
-        mc_size += ret(&cur);
+        result.fn_size += call_fn(&cur, target_fn);
+        result.fn_size += mov_mem_mem(&cur, rsp_d, (BncVal){0}, Bnc_r11); // replace the return address // would it be better to just jmp to it?
+        result.fn_size += add_rsp(&cur, rsp_d);
+        result.fn_size += ret(&cur);
     }
     else
-    {   mc_size += jmp_fn(&cur, fn);   }
+    {   result.fn_size += jmp_fn(&cur, target_fn);   }
 
-    assert(!exe || (cur == (mem + data_size + mc_size)), "not calculating the pushed size correctly");
-    return exe ?: (void *)(UPtr)(data_size + mc_size); // if we were passed a NULL, return the size, otherwise add nothing & return the start of the trampoline
+    assert(!result.fn ||
+           (cur == (mem + result.data_size + result.fn_size)), "not calculating the pushed size correctly");
+    return result; // if we were passed a NULL, return the size, otherwise add nothing & return the start of the trampoline
 }
 
 #else // WIN32
@@ -474,18 +479,18 @@ static Byte array_fn(Byte *arr, Size arr_n)
     return arr[arr_n-1];
 }
 
-static void spec_test()
+static void bnc_test()
 {
     void *exe_buf = VirtualAlloc(NULL, 4096, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
     U8 res_6 = args_6(1,2,3,4,0x123456789abcd,6);
 
     MyData data = { 42, .fs[3] = 6.28f };
-    F4 (*fn2)() = specialize(exe_buf, my_data_user, ARRAY__N((BncArg[]) { bnc_struct(&data, sizeof(data)) }));
+    F4 (*fn2)() = make_bounce_fn(exe_buf, my_data_user, ARRAY__N((BncArg[]) { bnc_struct(&data, sizeof(data)) })).fn;
     F4 my_data_expect = my_data_user(data);
     F4 my_data_actual = fn2();
 
 #define TEST(fmt, r, args, test_fn, array, expect, actual) do {\
-    r (*fn) args = specialize(exe_buf, test_fn, ARRAY__N(array)); \
+    r (*fn) args = make_bounce_fn(exe_buf, test_fn, ARRAY__N(array)).fn; \
     r res[2] = { test_fn expect, fn actual }; \
     printf("%s "   fmt " = %s\n" \
            "     " fmt " = %s\n", \
@@ -495,7 +500,7 @@ static void spec_test()
     } while (0)
 
     Byte arr[3] = { 1, 2, 3 };
-    Byte (*fn3)() = specialize(exe_buf, array_fn, ARRAY__N((BncArg[]) { bnc_copy(arr, sizeof(arr)), bnc_U8(sizeof(arr)) }));
+    Byte (*fn3)() = make_bounce_fn(exe_buf, array_fn, ARRAY__N((BncArg[]) { bnc_copy(arr, sizeof(arr)), bnc_U8(sizeof(arr)) })).fn;
     Byte byte = fn3();
 
 
@@ -534,10 +539,10 @@ static void spec_test()
               i, j, k, l, m, n, o,  p),
              (a, b, d, n));
 
-        /* U8 (*fn2)(U8, U8, U8, U8) = specialize( */
+        /* U8 (*fn2)(U8, U8, U8, U8) = make_bounce_fn( */
         /*     exe_buf, args_16, ARRAY__N((BncArg[]) { */
-        /*                                {BncArg_U8}, {BncArg_U8}, spec_U8(c), {BncArg_U8}, spec_U8(e), spec_U8(f),   spec_U8(g_), spec_U8(h), */
-        /*                                spec_U8(i),   spec_U8(j),   spec_U8(k), spec_U8(l),   spec_U8(m), {BncArg_U8}, spec_U8(o),  spec_U8(p), })); */
+        /*                                {BncArg_U8}, {BncArg_U8}, bnc_U8(c), {BncArg_U8}, bnc_U8(e), bnc_U8(f),   bnc_U8(g_), bnc_U8(h), */
+        /*                                bnc_U8(i),   bnc_U8(j),   bnc_U8(k), bnc_U8(l),   bnc_U8(m), {BncArg_U8}, bnc_U8(o),  bnc_U8(p), })); */
         /* U8 res_16 = args_16(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16); */
         /* U8 res2 = fn2(a, b, d, n); */
 
