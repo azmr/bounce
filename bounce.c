@@ -7,13 +7,6 @@
 // TODO: type checking
 // TODO: manual tail-call optimization? https://ekins.space/2017/06/07/trampoline/
 
-typedef enum BncXmm {
-    Bnc_xmm0,
-    Bnc_xmm1,
-    Bnc_xmm2,
-    Bnc_xmm3,
-} BncXmm;
-
 typedef enum BncReg {
     Bnc_ax,     // rax, eax, ax
     Bnc_cx,
@@ -21,7 +14,16 @@ typedef enum BncReg {
     Bnc_r8 = 8, // r8,  r8d, r8w
     Bnc_r9,
     Bnc_r10,
-    Bnc_r11, // NOTE: volatile & unused for both Windows & Linux => good scratch register
+    Bnc_r11, // NOTE: volatile & tmp_reg for both Windows & Linux => good scratch register
+
+    Bnc_xmm0 = 0,
+    Bnc_xmm1,
+    Bnc_xmm2,
+    Bnc_xmm3,
+    Bnc_xmm4,
+    Bnc_xmm5,
+    Bnc_xmm6,
+    Bnc_xmm7,
 } BncReg;
 
 typedef enum BncTag {
@@ -32,10 +34,8 @@ typedef enum BncTag {
     Bnc_reg       = 0,
 } BncTag;
 
-typedef struct BncArg {
-    BncTag tag; // contains size
-    union { void *ptr; U8 rU8; S8 rS8; F4 xF4; F8 xF8; };
-} BncArg;
+typedef union  { void *ptr; U8 rU8; U4 rU4; S8 rS8; F4 xF4; F8 xF8; BncReg reg; } BncVal;
+typedef struct { BncTag tag; union{ BncVal; BncVal val; }; } BncArg; // tag contains size
 
 internal inline BncArg bnc_copy(void *v, U4 size)
 {
@@ -65,8 +65,10 @@ internal inline Size mc_cpy(Byte **cur, Byte const *mc, Size size)
     return size;
 }
 
-internal inline Size mov_reg_lit4(Byte **cur, BncReg reg, U4 v)
-{
+#if 1  // MOV
+internal inline Size mov_reg_lit4(Byte **cur, BncReg reg, BncVal src, BncReg tmp_reg)
+{   (void)tmp_reg;
+    U4   v       = src.rU4;
     Size mc_size = ((reg >= Bnc_r8) ? mc_cpy(cur, &(Byte){ 0x41 }, 1) : 0); // extended prefix
 
     Byte mc[] = {
@@ -78,8 +80,9 @@ internal inline Size mov_reg_lit4(Byte **cur, BncReg reg, U4 v)
     return mc_size;
 }
 
-internal inline Size mov_reg_lit8(Byte **cur, BncReg reg, U8 v)
-{
+internal inline Size mov_reg_imm(Byte **cur, BncReg reg, BncVal src, BncReg tmp_reg)
+{   (void)tmp_reg;
+    U8   v    = src.rU8;
     Byte mc[] = {
         0x48 + (reg >= Bnc_r8),                            // 8-byte modifier prefix
         0xb8 + (reg %  Bnc_r8),                            // mov literal into r
@@ -90,46 +93,30 @@ internal inline Size mov_reg_lit8(Byte **cur, BncReg reg, U8 v)
 }
 
 
-internal inline Size mov_reg_reg(Byte **cur, BncReg dst_reg, BncReg src_reg)
-{
-    if (dst_reg != src_reg)
+internal inline Size mov_reg_reg(Byte **cur, BncReg dst, BncVal src, BncReg tmp_reg)
+{   (void)tmp_reg;
+    if (dst != src.reg)
     {
         // NOTE: 4-byte version takes 2 bytes instead of 3 for e_x but not r8d,r9d
         // given that we can only swap these low registers max once per function, it's not really worth the complexity for 1 byte...
         Byte mc[] = {
-            (0x48 + (src_reg >= Bnc_r8) + 4*(dst_reg >= Bnc_r8)), // 8-byte mod prefix
+            (0x48 + (src.rU4 >= Bnc_r8) + 4*(dst >= Bnc_r8)), // 8-byte mod prefix
             0x89,                                                   // mov from register
-            (0xc0 + 8*(src_reg%8) + (dst_reg%8)),                   // src & dst reg
+            (0xc0 + 8*(src.rU4 % 8) + (dst % 8)),                   // src & dst reg
         };
         return mc_cpy(cur, mc, sizeof(mc));
     }
     else return 0;
 }
 
-internal inline Size jmp_fn(Byte **cur, void *fn)
-{
-    Size mc_size = mov_reg_lit8(cur, Bnc_ax, (U8)fn); // mov rax, fn
-    if (cur)
-    {   cur[0][0]=0xff, cur[0][1]=0xe0; *cur += 2;   } // jmp rax
-    return mc_size + 2;
-}
-
-internal inline Size call_fn(Byte **cur, void *fn)
-{
-    Size mc_size = mov_reg_lit8(cur, Bnc_ax, (U8)fn); // mov rax, fn
-    if (cur)
-    {   cur[0][0]=0xff, cur[0][1]=0xd0; *cur += 2;   } // call rax
-    return mc_size + 2;
-}
-
-internal inline Size mov_xmm_xmm(Byte **cur, BncXmm dst_xmm, BncXmm src_xmm)
-{
-    if (dst_xmm != src_xmm)
+internal inline Size mov_xmm_xmm(Byte **cur, BncReg dst_xmm, BncVal src_xmm, BncReg tmp_reg)
+{   (void)tmp_reg;
+    if (dst_xmm != src_xmm.reg)
     {
         Byte mc[] = {
             0xf3, 0x0f,                   // prefix
             0x7e,                         // mov to xmm
-            (0xc0 + 8*dst_xmm + src_xmm), // src & dst
+            (0xc0 + 8*dst_xmm + src_xmm.rU4), // src & dst
         };
         return mc_cpy(cur, mc, sizeof(mc));
     }
@@ -137,9 +124,9 @@ internal inline Size mov_xmm_xmm(Byte **cur, BncXmm dst_xmm, BncXmm src_xmm)
 }
 
 // TODO: there may be a better approach; this is quite a large instruction
-internal inline Size mov_xmm_F4(Byte **cur, BncXmm xmm, F4 v)
+internal inline Size mov_xmm_F4(Byte **cur, int xmm, BncVal val, BncReg tmp_reg)
 {
-    Size mc_size = mov_reg_lit4(cur, Bnc_ax, (union{F4 f; U4 u;}){v}.u);
+    Size mc_size = mov_reg_lit4(cur, Bnc_ax, val, tmp_reg);
     Byte mc[]    = {
         0x66, 0x0f,       // prefix
         0x6e,             // mov to xmm
@@ -149,9 +136,10 @@ internal inline Size mov_xmm_F4(Byte **cur, BncXmm xmm, F4 v)
 }
 
 // TODO: there may be a better approach; this is quite a large instruction
-internal inline Size mov_xmm_F8(Byte **cur, BncXmm xmm, F8 v)
-{
-    Size mc_size = mov_reg_lit8(cur, Bnc_ax, (union{F8 f; U8 u;}){v}.u);
+internal inline Size mov_xmm_F8(Byte **cur, int xmm, BncVal val, BncReg tmp_reg)
+{   (void)tmp_reg;
+    assert(tmp_reg == Bnc_ax);
+    Size mc_size = mov_reg_imm(cur, Bnc_ax, val, tmp_reg);
     Byte mc[]    = {
         0x66, 0x48, 0x0f, // prefix
         0x6e,             // mov to xmm
@@ -160,11 +148,11 @@ internal inline Size mov_xmm_F8(Byte **cur, BncXmm xmm, F8 v)
     return mc_size + mc_cpy(cur, mc, sizeof(mc));
 }
 
-typedef enum { reg_mem, mem_reg } BncMemRegDir;
+typedef enum { Bnc_reg_mem, Bnc_mem_reg } BncMemRegDir;
 internal inline Size mov_reg_mem_reg(Byte **cur, BncMemRegDir dir, BncReg reg, Size rsp_offset)
 {
-    Byte dir_mc[] = { [reg_mem]=0x8b, [mem_reg]=0x89, };
-    if (rsp_offset < 0x7f)
+    Byte dir_mc[] = { [Bnc_reg_mem]=0x8b, [Bnc_mem_reg]=0x89, };
+    if (0 <= rsp_offset && rsp_offset < 0x7f)
     {
         Byte mc[] = {
             0x48 + 4*(reg >= Bnc_r8),                   // prefix
@@ -179,28 +167,28 @@ internal inline Size mov_reg_mem_reg(Byte **cur, BncMemRegDir dir, BncReg reg, S
         return 0;
     }
 }
-internal inline Size mov_reg_mem(Byte **cur, BncReg reg, Size rsp_offset) { return mov_reg_mem_reg(cur, reg_mem, reg, rsp_offset); }
-internal inline Size mov_mem_reg(Byte **cur, Size rsp_offset, BncReg reg) { return mov_reg_mem_reg(cur, mem_reg, reg, rsp_offset); }
-internal inline Size mov_mem_mem(Byte **cur, Size dst_rsp_offset, Size src_rsp_offset, BncReg tmp_reg)
-{
+internal inline Size mov_reg_mem(Byte **cur, BncReg reg,            BncVal rsp_offset,     BncReg tmp_reg) { (void)tmp_reg; return mov_reg_mem_reg(cur, Bnc_reg_mem, reg,     rsp_offset.reg); }
+internal inline Size mov_mem_reg(Byte **cur, int    rsp_offset,     BncVal reg,            BncReg tmp_reg) { (void)tmp_reg; return mov_reg_mem_reg(cur, Bnc_mem_reg, reg.reg, rsp_offset); }
+internal inline Size mov_mem_mem(Byte **cur, int    dst_rsp_offset, BncVal src_rsp_offset, BncReg tmp_reg)
+{   (void)tmp_reg;
     Size mc_size  = 0;
-    if (dst_rsp_offset != src_rsp_offset)
+    if (dst_rsp_offset != src_rsp_offset.reg)
     {
-        mc_size += mov_reg_mem_reg(cur, reg_mem, tmp_reg, src_rsp_offset);
-        mc_size += mov_reg_mem_reg(cur, mem_reg, tmp_reg, dst_rsp_offset);
+        mc_size += mov_reg_mem_reg(cur, Bnc_reg_mem, tmp_reg, src_rsp_offset.reg);
+        mc_size += mov_reg_mem_reg(cur, Bnc_mem_reg, tmp_reg, dst_rsp_offset);
     }
     return mc_size;
 }
 
-internal inline Size mov_mem_xmm(Byte **cur, Size rsp_offset, BncXmm xmm)
-{
-    if (rsp_offset < 0x7f)
+internal inline Size mov_mem_xmm(Byte **cur, int rsp_offset, BncVal xmm, BncReg tmp_reg)
+{   (void)tmp_reg;
+    if (0 <= rsp_offset && rsp_offset < 0x7f)
     {
         Byte mc[] = {
-            0x66, 0x0f,         // prefix
-            0xd6, 0x44 + 8*xmm, // mov from xmm
+            0x66, 0x0f,             // prefix
+            0xd6, 0x44 + 8*xmm.reg, // mov from xmm
             0x24,
-            (S1)rsp_offset      // to [rsp + rsp_offset]
+            (S1)rsp_offset          // to [rsp + rsp_offset]
         }; // add rsp -size
         return mc_cpy(cur, mc, sizeof(mc));
     }
@@ -212,13 +200,14 @@ internal inline Size mov_mem_xmm(Byte **cur, Size rsp_offset, BncXmm xmm)
 }
 
 
-internal inline Size mov_mem_lit8(Byte **cur, Size rsp_offset, U8 v)
+internal inline Size mov_mem_imm(Byte **cur, int rsp_offset, BncVal val, BncReg tmp_reg)
 {
     // TODO (perf,mem): can do much more succinctly with values that fit in 4 bytes
-    Size mc_size = mov_reg_lit8(cur, Bnc_ax, v);
-    mc_size += mov_mem_reg(cur, rsp_offset, Bnc_ax);
-    return mc_size;
+    Size   mc_size = mov_reg_imm(cur, tmp_reg,    val,                    tmp_reg);
+    return mc_size + mov_mem_reg(cur, rsp_offset, (BncVal){.reg=tmp_reg}, tmp_reg);
 }
+
+#endif // MOV
 
 internal inline Size sub_rsp(Byte **cur, Size size)
 {
@@ -248,6 +237,22 @@ internal inline Size add_rsp(Byte **cur, Size size)
 
     else TODO("haven't handled multi-byte sizes; trying to pass in %zu args", size / 8);
     return 0;
+}
+
+internal inline Size jmp_fn(Byte **cur, void *fn)
+{
+    Size mc_size = mov_reg_imm(cur, Bnc_ax, (BncVal){.ptr=fn}, 0); // mov rax, fn
+    if (cur)
+    {   cur[0][0]=0xff, cur[0][1]=0xe0; *cur += 2;   } // jmp rax
+    return mc_size + 2;
+}
+
+internal inline Size call_fn(Byte **cur, void *fn)
+{
+    Size mc_size = mov_reg_imm(cur, Bnc_ax, (BncVal){.ptr=fn}, 0); // mov rax, fn
+    if (cur)
+    {   cur[0][0]=0xff, cur[0][1]=0xd0; *cur += 2;   } // call rax
+    return mc_size + 2;
 }
 
 internal inline Size ret(Byte **cur)
@@ -288,15 +293,39 @@ specialize(Byte *mem, void *fn, BncArg const args[], Size args_n)
 {
 #define assume_args_are_sorted
     persist const BncReg Arg_I_Regs[] = { Bnc_cx, Bnc_dx, Bnc_r8, Bnc_r9, };
-    /* typedef Size BncMCFn() */
-    /* persist const Size (*) */
+    typedef Size BncMovFn(Byte **, int, BncVal, int);
+
+    enum         { Loc_null, Loc_reg,     Loc_xmm,     Loc_mem,                                              Loc_Count };
+    typedef enum { Dst_null, Dst_reg,     Dst_xmm,     Dst_mem,                                              Dst_Count } BncDstLoc;
+    typedef enum { Src_null, Src_reg,     Src_xmm,     Src_mem,     Src__U8,     Src__F4,     Src__F8,       Src_Count } BncSrcLoc;
+    persist BncMovFn * const Movs[Dst_Count][Src_Count] = {
+        [Dst_reg]={ 0,       mov_reg_reg, 0,           0,           mov_reg_imm, },
+        [Dst_xmm]={ 0,       0,           mov_xmm_xmm, 0,           0,           mov_xmm_F4,  mov_xmm_F8  },
+        [Dst_mem]={ 0,       mov_mem_reg, mov_mem_xmm, mov_mem_mem, mov_mem_imm, mov_mem_imm, mov_mem_imm },
+    };
+    persist int const Arg_Locs[2/*stack*/][2/*float*/] = { // NOTE: other than immediates
+        //         scalar   float
+        /* regs */ Loc_reg, Loc_xmm,
+        /* stack*/ Loc_mem, Loc_mem,
+    };
+    persist BncSrcLoc const Imm_Locs[2/*stack*/][2/*size*/][2/*float*/] = {
+        //          scalar   float
+        { // regs
+            /* 4 */ Src__U8, Src__F4,
+            /* 8 */ Src__U8, Src__F8, // only worth dealing with floats specially when they're going into XMM registers
+        },
+        { // stack
+            /* 4 */ Src__U8, Src__U8,
+            /* 8 */ Src__U8, Src__U8,
+        }
+    };
 
     Byte *data      = mem;
     Size  mc_size   = 0,
           data_size = 0,
           data_used = 0;
 
-    Size gen_fn_args_n = 0; // generated function
+    Size gen_fn_args_n = 0;
     for (Size i = args_n; i-- > 0;)
     {
         BncArg arg     = args[i];
@@ -307,7 +336,7 @@ specialize(Byte *mem, void *fn, BncArg const args[], Size args_n)
             data_size   = spec_align_up_offset(data, data_size, arg_size) + arg_size;
         }
     }
-    Size gen_fn_arg_i = gen_fn_args_n - 1;
+    Size src_fn_arg_i = gen_fn_args_n - 1;
 
     Byte *exe = (mem ? mem + data_size : 0); // make space for data before the executable
     Byte *cur = exe;
@@ -316,73 +345,71 @@ specialize(Byte *mem, void *fn, BncArg const args[], Size args_n)
     if (args_n > 4)
     {
         rsp_d    = args_n - gen_fn_args_n;
-        rsp_d   += rsp_d & 1; // rsp 16 byte align
-        rsp_d   *= sizeof(void*);
+        rsp_d    = (rsp_d + rsp_d & 1) * sizeof(void*); // rsp 16 byte align
         mc_size += sub_rsp(&cur, rsp_d);
-        mc_size += mov_mem_mem(&cur, 0, rsp_d, Bnc_ax); // move the return address to rsp
+        mc_size += mov_mem_mem(&cur, 0, (BncVal){.reg=rsp_d}, Bnc_ax); // move the return address to rsp
     }
+
 
     // NOTE: need to make sure we don't clobber args before we use them elsewhere
-    for (Size tgt_fn_arg_i = args_n; tgt_fn_arg_i-- > 0;)
+    for (Size dst_fn_arg_i = args_n; dst_fn_arg_i-- > 0;)
     { // move args from a literal/generated position to their target position
-        BncArg arg     = args[tgt_fn_arg_i];
-        BncReg tgt_reg = Arg_I_Regs[tgt_fn_arg_i];
-        BncXmm tgt_xmm = tgt_fn_arg_i;
-        U4 arg_size = arg.tag & Bnc_size_mask;
+        BncArg arg      = args[dst_fn_arg_i];
+        U4     arg_size = (arg.tag & Bnc_size_mask) ?: 8; // NOTE: default 0 allows API users to not specify all args that haven't changed (as long as they're scalar)
+        int    is_float = !!(arg.tag & Bnc_float);
 
-
-        if (! (arg.tag & Bnc_fix))
-        { // relocate the gen arg to the appropriate index for the target arg
-            Size tgt_mem = 8*(tgt_fn_arg_i);
-            if (tgt_fn_arg_i < 4) // both in & out params are in registers
-            {
-                if (arg.tag & Bnc_float) { mc_size += mov_xmm_xmm(&cur, tgt_xmm, gen_fn_arg_i);             }
-                else                     { mc_size += mov_reg_reg(&cur, tgt_reg, Arg_I_Regs[gen_fn_arg_i]); }
-            }
-            else if (gen_fn_arg_i < 4)
-            {
-                if (arg.tag & Bnc_float) { mc_size += mov_mem_xmm(&cur, tgt_mem, gen_fn_arg_i);             }
-                else                     { mc_size += mov_mem_reg(&cur, tgt_mem, Arg_I_Regs[gen_fn_arg_i]); }
-            }
-            else
-            {   mc_size += mov_mem_mem(&cur, tgt_mem, 8*(gen_fn_arg_i), Bnc_ax);   }
-            --gen_fn_arg_i;
+        // COPY CACHED DATA ////////////////////////////////////////////////////////////
+        if (arg.tag & Bnc_copy) // NOTE: this has to be done before using the arg's val
+        { // push some data and pass a pointer to it
+            data_used = spec_align_up_offset(data, data_used, arg_size);
+            if (cur)
+            {   arg.ptr = memcpy(&data[data_used], arg.ptr, arg_size);   }
+            data_used += arg_size;
+            arg_size  = sizeof(void*);
         }
 
-        else
+        // DETERMINE PARAMETERS BASED ON ARG LOCATION //////////////////////////////////
+        U4 const dsts[Dst_Count] = {
+            [Dst_reg] = Arg_I_Regs[dst_fn_arg_i],
+            [Dst_xmm] = dst_fn_arg_i,
+            [Dst_mem] = 8*dst_fn_arg_i,
+        };
+        BncVal const srcs[Src_Count] = {
+            [Src_reg] = { .rU4 = Arg_I_Regs[src_fn_arg_i] },
+            [Src_xmm] = { .rU4 = src_fn_arg_i },
+            [Src_mem] = { .rU4 = 8*src_fn_arg_i },
+            [Src__U8] = arg.val,
+            [Src__F4] = arg.val,
+            [Src__F8] = arg.val,
+        };
+
+        // DETERMINE DEST & SRC LOCATIONS //////////////////////////////////////////////
+        BncDstLoc dst = Arg_Locs[dst_fn_arg_i >= 4][is_float];
+        BncSrcLoc src = 0;
+
+        if (arg.tag & Bnc_fix)
         {
-            if (tgt_fn_arg_i < 4)
-            { // handle args that we are fixing in place/won't be visible as parameters to the generated fn
-                if (arg.tag & Bnc_copy)
-                { // push some data and pass a pointer to it
-                    if (cur)
-                    {   memcpy(&data[data_used], arg.ptr, arg_size);   }
-                    data_used = spec_align_up_offset(data, data_used, arg_size);
-                    arg.ptr   = &data[data_used];
-                    data_used += arg_size;
-                }
-
-                if (arg.tag & Bnc_float)
-                {
-                    if      (arg_size == 4) { mc_size += mov_xmm_F4(&cur, tgt_xmm, arg.xF4); }
-                    else if (arg_size == 8) { mc_size += mov_xmm_F8(&cur, tgt_xmm, arg.xF8); }
-                    else                    { unreachable("unhandled float size: %d", arg.tag); }
-                }
-                else { mc_size += mov_reg_lit8(&cur, tgt_reg, arg.rU8); }
-            }
-            else { mc_size += mov_mem_lit8(&cur, 8*tgt_fn_arg_i, arg.rU8); }
+            assert(arg_size <= 8, "unhandled arg size: %u", arg_size);
+            assert(!is_float || arg_size == 4 || arg_size == 8, "unhandled float size: %u", arg_size);
+            src = Imm_Locs[dst_fn_arg_i >= 4][arg_size/4 - 1][is_float];
         }
+        else
+        {   src = Arg_Locs[src_fn_arg_i-- >= 4][is_float];   }
+
+        // MOV AS APPROPRIATE //////////////////////////////////////////////////////////
+        assert(dst && src);
+        mc_size += Movs[dst][src](&cur, dsts[dst], srcs[src], Bnc_ax); // NOTE: ax is only used in mem_mem, where it's the tmp register
     }
 
-    if (args_n <= 4)
-    {   mc_size += jmp_fn(&cur, fn);   }
-    else // NOTE: we have changed rsp, so we need control to return here to reset it
-    {
+    if (args_n > 4)
+    { // NOTE: we have changed rsp, so we need control to return here to reset it
         mc_size += call_fn(&cur, fn);
-        mc_size += mov_mem_mem(&cur, rsp_d, 0, Bnc_cx); // replace the return address // would it be better to just jmp to it?
+        mc_size += mov_mem_mem(&cur, rsp_d, (BncVal){0}, Bnc_r11); // replace the return address // would it be better to just jmp to it?
         mc_size += add_rsp(&cur, rsp_d);
         mc_size += ret(&cur);
     }
+    else
+    {   mc_size += jmp_fn(&cur, fn);   }
 
     assert(!exe || (cur == (mem + data_size + mc_size)), "not calculating the pushed size correctly");
     return exe ?: (void *)(UPtr)(data_size + mc_size); // if we were passed a NULL, return the size, otherwise add nothing & return the start of the trampoline
