@@ -634,6 +634,7 @@ static void bnc_test()
 #define TEST(fmt, r, args, test_fn, array, expect, actual) do {\
     r (*fn) args = make_bounce_fn(exe_buf, test_fn, ARRAY__N(array)).fn; \
     r res[2] = { test_fn expect, fn actual }; \
+    if (res[0] != res[1]) \
     printf("%s "   fmt " = %s\n" \
            "     " fmt " = %s\n", \
            (res[0]==res[1] ? "PASS" : "FAIL"), \
