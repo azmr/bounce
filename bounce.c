@@ -11,7 +11,12 @@ typedef enum BncReg {
     Bnc_ax,     // rax, eax, ax
     Bnc_cx,
     Bnc_dx,
-    Bnc_r8 = 8, // r8,  r8d, r8w
+    Bnc_bx,
+    Bnc_sp,
+    Bnc_bp,
+    Bnc_si,
+    Bnc_di,
+    Bnc_r8, // r8,  r8d, r8w
     Bnc_r9,
     Bnc_r10,
     Bnc_r11, // NOTE: volatile & tmp_reg for both Windows & Linux => good scratch register
@@ -24,6 +29,7 @@ typedef enum BncReg {
     Bnc_xmm5,
     Bnc_xmm6,
     Bnc_xmm7,
+    Bnc_xmms_n,
 } BncReg;
 
 typedef enum BncTag {
@@ -49,6 +55,8 @@ internal inline BncArg bnc_copy(void *v, U4 size)
 }
 internal inline BncArg bnc_struct(void *v, U4 size)
 {
+    TODO("Passing struct literals is unsupported due to the complexity of Linux's calling convention.\n"
+         "Ensure your function takes a pointer to the struct and use bnc_copy instead");
     BncArg result = {0};
     if (size > sizeof(void*)) { result = bnc_copy(v, size);                                  }
     else                      { result.tag = (Bnc_fix | size), memcpy(&result.rU8, v, size); }
@@ -71,7 +79,7 @@ internal inline Size mc_cpy(Byte **cur, Byte const *mc, Size size)
 }
 
 #if 1  // MOV
-internal inline Size mov_reg_lit4(Byte **cur, BncReg reg, BncVal src, BncReg tmp_reg)
+internal inline Size mov_reg_lit4(Byte **cur, int reg, BncVal src, int tmp_reg)
 {   (void)tmp_reg;
     U4   v       = src.rU4;
     Size mc_size = ((reg >= Bnc_r8) ? mc_cpy(cur, &(Byte){ 0x41 }, 1) : 0); // extended prefix
@@ -85,7 +93,7 @@ internal inline Size mov_reg_lit4(Byte **cur, BncReg reg, BncVal src, BncReg tmp
     return mc_size;
 }
 
-internal inline Size mov_reg_imm(Byte **cur, BncReg reg, BncVal src, BncReg tmp_reg)
+internal inline Size mov_reg_imm(Byte **cur, int reg, BncVal src, int tmp_reg)
 {   (void)tmp_reg;
     U8   v    = src.rU8;
     Byte mc[] = {
@@ -98,7 +106,7 @@ internal inline Size mov_reg_imm(Byte **cur, BncReg reg, BncVal src, BncReg tmp_
 }
 
 
-internal inline Size mov_reg_reg(Byte **cur, BncReg dst, BncVal src, BncReg tmp_reg)
+internal inline Size mov_reg_reg(Byte **cur, int dst, BncVal src, int tmp_reg)
 {   (void)tmp_reg;
     if (dst != src.reg)
     {
@@ -114,7 +122,7 @@ internal inline Size mov_reg_reg(Byte **cur, BncReg dst, BncVal src, BncReg tmp_
     else return 0;
 }
 
-internal inline Size mov_xmm_xmm(Byte **cur, BncReg dst_xmm, BncVal src_xmm, BncReg tmp_reg)
+internal inline Size mov_xmm_xmm(Byte **cur, int dst_xmm, BncVal src_xmm, int tmp_reg)
 {   (void)tmp_reg;
     if (dst_xmm != src_xmm.reg)
     {
@@ -129,7 +137,7 @@ internal inline Size mov_xmm_xmm(Byte **cur, BncReg dst_xmm, BncVal src_xmm, Bnc
 }
 
 // TODO: there may be a better approach; this is quite a large instruction
-internal inline Size mov_xmm_F4(Byte **cur, int xmm, BncVal val, BncReg tmp_reg)
+internal inline Size mov_xmm_F4(Byte **cur, int xmm, BncVal val, int tmp_reg)
 {
     Size mc_size = mov_reg_lit4(cur, Bnc_ax, val, tmp_reg);
     Byte mc[]    = {
@@ -141,7 +149,7 @@ internal inline Size mov_xmm_F4(Byte **cur, int xmm, BncVal val, BncReg tmp_reg)
 }
 
 // TODO: there may be a better approach; this is quite a large instruction
-internal inline Size mov_xmm_F8(Byte **cur, int xmm, BncVal val, BncReg tmp_reg)
+internal inline Size mov_xmm_F8(Byte **cur, int xmm, BncVal val, int tmp_reg)
 {   (void)tmp_reg;
     assert(tmp_reg == Bnc_ax);
     Size mc_size = mov_reg_imm(cur, Bnc_ax, val, tmp_reg);
@@ -154,10 +162,11 @@ internal inline Size mov_xmm_F8(Byte **cur, int xmm, BncVal val, BncReg tmp_reg)
 }
 
 typedef enum { Bnc_reg_mem, Bnc_mem_reg } BncMemRegDir;
-internal inline Size mov_reg_mem_reg(Byte **cur, BncMemRegDir dir, BncReg reg, Size rsp_offset)
+internal inline Size mov_reg_mem_reg(Byte **cur, BncMemRegDir dir, int reg, int rsp_offset)
 {
     Byte dir_mc[] = { [Bnc_reg_mem]=0x8b, [Bnc_mem_reg]=0x89, };
-    if (0 <= rsp_offset && rsp_offset < 0x7f)
+    assert(0 <= rsp_offset, "rsp_offset shouldn't be negative. rsp_offset = %d", rsp_offset);
+    if (rsp_offset < 0x7f)
     {
         Byte mc[] = {
             0x48 + 4*(reg >= Bnc_r8),                   // prefix
@@ -172,9 +181,9 @@ internal inline Size mov_reg_mem_reg(Byte **cur, BncMemRegDir dir, BncReg reg, S
         return 0;
     }
 }
-internal inline Size mov_reg_mem(Byte **cur, BncReg reg,            BncVal rsp_offset,     BncReg tmp_reg) { (void)tmp_reg; return mov_reg_mem_reg(cur, Bnc_reg_mem, reg,     rsp_offset.reg); }
-internal inline Size mov_mem_reg(Byte **cur, int    rsp_offset,     BncVal reg,            BncReg tmp_reg) { (void)tmp_reg; return mov_reg_mem_reg(cur, Bnc_mem_reg, reg.reg, rsp_offset); }
-internal inline Size mov_mem_mem(Byte **cur, int    dst_rsp_offset, BncVal src_rsp_offset, BncReg tmp_reg)
+internal inline Size mov_reg_mem(Byte **cur, int reg,            BncVal rsp_offset,     int tmp_reg) { (void)tmp_reg; return mov_reg_mem_reg(cur, Bnc_reg_mem, reg,     rsp_offset.reg); }
+internal inline Size mov_mem_reg(Byte **cur, int rsp_offset,     BncVal reg,            int tmp_reg) { (void)tmp_reg; return mov_reg_mem_reg(cur, Bnc_mem_reg, reg.reg, rsp_offset); }
+internal inline Size mov_mem_mem(Byte **cur, int dst_rsp_offset, BncVal src_rsp_offset, int tmp_reg)
 {   (void)tmp_reg;
     Size mc_size  = 0;
     if (dst_rsp_offset != src_rsp_offset.reg)
@@ -185,9 +194,10 @@ internal inline Size mov_mem_mem(Byte **cur, int    dst_rsp_offset, BncVal src_r
     return mc_size;
 }
 
-internal inline Size mov_mem_xmm(Byte **cur, int rsp_offset, BncVal xmm, BncReg tmp_reg)
+internal inline Size mov_mem_xmm(Byte **cur, int rsp_offset, BncVal xmm, int tmp_reg)
 {   (void)tmp_reg;
-    if (0 <= rsp_offset && rsp_offset < 0x7f)
+    assert(0 <= rsp_offset, "rsp_offset shouldn't be negative. rsp_offset = %d", rsp_offset);
+    if (rsp_offset < 0x7f)
     {
         Byte mc[] = {
             0x66, 0x0f,             // prefix
@@ -205,7 +215,7 @@ internal inline Size mov_mem_xmm(Byte **cur, int rsp_offset, BncVal xmm, BncReg 
 }
 
 
-internal inline Size mov_mem_imm(Byte **cur, int rsp_offset, BncVal val, BncReg tmp_reg)
+internal inline Size mov_mem_imm(Byte **cur, int rsp_offset, BncVal val, int tmp_reg)
 {
     // TODO (perf,mem): can do much more succinctly with values that fit in 4 bytes
     Size   mc_size = mov_reg_imm(cur, tmp_reg,    val,                    tmp_reg);
@@ -266,6 +276,24 @@ internal inline Size ret(Byte **cur)
     return 1;
 }
 
+internal inline U4 jmp_or_call_and_cleanup(Byte **cur, void *target_fn, U4 rsp_d)
+{
+    U4 mc_size = 0;
+
+    if (rsp_d > 0)
+    { // NOTE: we have changed rsp, so we need control to return here to reset it
+        mc_size += call_fn(cur, target_fn);
+        mc_size += mov_mem_mem(cur, rsp_d, (BncVal){0}, Bnc_r11); // replace the return address // would it be better to just jmp to it?
+        mc_size += add_rsp(cur, rsp_d);
+        mc_size += ret(cur);
+    }
+    else
+    {   mc_size += jmp_fn(cur, target_fn);   }
+
+    return mc_size;
+}
+
+
 #endif // MACHINE CODE
 
 static inline U1
@@ -287,6 +315,47 @@ internal inline UPtr bnc_align_up_offset(Byte *base, UPtr offset, UPtr size)
     return new_base - (UPtr)base;
 }
 
+internal inline int bnc_copy_data_cache_size(Byte const *cur, Byte *data, U4 *data_size, BncArg *arg)
+{
+    int result = arg->tag & Bnc_copy;
+    if (result) // NOTE: this has to be done before using the arg's val
+    { // push some data and pass a pointer to it
+        U4 arg_size = arg->tag & Bnc_size_mask;
+        *data_size  = bnc_align_up_offset(data, *data_size, arg_size);
+        if (cur)
+        {   arg->ptr = memcpy(&data[*data_size], arg->ptr, arg_size);   }
+        *data_size += arg_size;
+    }
+    return result;
+}
+
+internal inline U4 bnc_prep_stack(Byte **cur, U4 stack_args_n, U4 *rsp_d_out)
+{
+    U4 rsp_d    = *rsp_d_out = (stack_args_n + (stack_args_n & 1)) * sizeof(void*); // rsp 16 byte align
+    U4 mc_size  = sub_rsp(cur, rsp_d);
+    mc_size    += mov_mem_mem(cur, 0, (BncVal){.reg=rsp_d}, Bnc_ax); // move the return address to rsp
+    return mc_size;
+}
+
+typedef Size BncMovFn(Byte **, int, BncVal, int);
+enum         { Loc_null, Loc_reg,     Loc_xmm,     Loc_mem,                                              Loc_Count };
+typedef enum { Dst_null, Dst_reg,     Dst_xmm,     Dst_mem,                                              Dst_Count } BncDstLoc;
+typedef enum { Src_null, Src_reg,     Src_xmm,     Src_mem,     Src__U8,     Src__F4,     Src__F8,       Src_Count } BncSrcLoc;
+global BncMovFn * const Movs[Dst_Count][Src_Count] = {
+    [Dst_reg]={ 0,       mov_reg_reg, 0,           0,           mov_reg_imm,                          },
+    [Dst_xmm]={ 0,       0,           mov_xmm_xmm, 0,           0,           mov_xmm_F4,  mov_xmm_F8  },
+    [Dst_mem]={ 0,       mov_mem_reg, mov_mem_xmm, mov_mem_mem, mov_mem_imm, mov_mem_imm, mov_mem_imm },
+};
+global int const Arg_Locs[2/*stack*/][2/*float*/] = { // NOTE: other than immediates
+    //         scalar   float
+    /* regs */ Loc_reg, Loc_xmm,
+    /* stack*/ Loc_mem, Loc_mem,
+};
+global BncSrcLoc const Imm_Locs[2/*size*/][2/*float*/] = {
+    //      scalar   float
+    /* 4 */ Src__U8, Src__F4,
+    /* 8 */ Src__U8, Src__F8, // only worth dealing with floats specially when they're going into XMM registers
+};
 
 #if _WIN32
 // TODO: structs > 64 bits have a pointer passed to them in rcx
@@ -299,26 +368,6 @@ make_bounce_fn(Byte *mem, void *target_fn, BncArg const args[], Size args_n)
 #define assume_args_are_sorted
     persist const BncReg Arg_I_Regs[] = { Bnc_cx, Bnc_dx, Bnc_r8, Bnc_r9, };
 
-    typedef Size BncMovFn(Byte **, int, BncVal, int);
-    enum         { Loc_null, Loc_reg,     Loc_xmm,     Loc_mem,                                              Loc_Count };
-    typedef enum { Dst_null, Dst_reg,     Dst_xmm,     Dst_mem,                                              Dst_Count } BncDstLoc;
-    typedef enum { Src_null, Src_reg,     Src_xmm,     Src_mem,     Src__U8,     Src__F4,     Src__F8,       Src_Count } BncSrcLoc;
-    persist BncMovFn * const Movs[Dst_Count][Src_Count] = {
-        [Dst_reg]={ 0,       mov_reg_reg, 0,           0,           mov_reg_imm,                          },
-        [Dst_xmm]={ 0,       0,           mov_xmm_xmm, 0,           0,           mov_xmm_F4,  mov_xmm_F8  },
-        [Dst_mem]={ 0,       mov_mem_reg, mov_mem_xmm, mov_mem_mem, mov_mem_imm, mov_mem_imm, mov_mem_imm },
-    };
-    persist int const Arg_Locs[2/*stack*/][2/*float*/] = { // NOTE: other than immediates
-        //         scalar   float
-        /* regs */ Loc_reg, Loc_xmm,
-        /* stack*/ Loc_mem, Loc_mem,
-    };
-    persist BncSrcLoc const Imm_Locs[2/*size*/][2/*float*/] = {
-        //      scalar   float
-        /* 4 */ Src__U8, Src__F4,
-        /* 8 */ Src__U8, Src__F8, // only worth dealing with floats specially when they're going into XMM registers
-    };
-
     BncFn result = { .data = mem };
     U4 mc_size = 0, data_size = 0, data_used = 0;
 
@@ -327,26 +376,15 @@ make_bounce_fn(Byte *mem, void *target_fn, BncArg const args[], Size args_n)
     {
         BncArg arg     = args[i];
         gen_fn_args_n += !(arg.tag & Bnc_fix); // count the number of args to be passed to the generated fn
-        if (arg.tag & Bnc_copy)
-        { // determine the space needed before the code for copied data
-            U4 arg_size = (arg.tag & Bnc_size_mask);
-            data_size = bnc_align_up_offset(result.data, data_size, arg_size) + arg_size;
-        }
+        bnc_copy_data_cache_size(NULL, result.data, &data_size, &arg);
     }
     Size src_fn_arg_i = gen_fn_args_n - 1;
 
-    Byte *cur = (mem ? mem + data_size : 0); // make space for data before the executable
-    result.fn = cur;
+    Byte *cur = result.fn = (mem ? mem + data_size : 0); // make space for data before the executable
 
-    Size rsp_d = 0;
+    U4 rsp_d = 0;
     if (args_n > 4)
-    {
-        rsp_d    = args_n - gen_fn_args_n;
-        rsp_d    = (rsp_d + rsp_d & 1) * sizeof(void*); // rsp 16 byte align
-        mc_size += sub_rsp(&cur, rsp_d);
-        mc_size += mov_mem_mem(&cur, 0, (BncVal){.reg=rsp_d}, Bnc_ax); // move the return address to rsp
-    }
-
+    {   mc_size += bnc_prep_stack(&cur, args_n - gen_fn_args_n, &rsp_d);   }
 
     // NOTE: need to make sure we don't clobber args before we use them elsewhere
     for (Size dst_fn_arg_i = args_n; dst_fn_arg_i-- > 0;)
@@ -356,20 +394,14 @@ make_bounce_fn(Byte *mem, void *target_fn, BncArg const args[], Size args_n)
         int    is_float = !!(arg.tag & Bnc_float);
 
         // COPY CACHED DATA ////////////////////////////////////////////////////////////
-        if (arg.tag & Bnc_copy) // NOTE: this has to be done before using the arg's val
-        { // push some data and pass a pointer to it
-            data_used = bnc_align_up_offset(result.data, data_used, arg_size);
-            if (cur)
-            {   arg.ptr = memcpy(&result.data[data_used], arg.ptr, arg_size);   }
-            data_used += arg_size;
-            arg_size  = sizeof(void*);
-        }
+        if (bnc_copy_data_cache_size(cur, result.data, &data_used, &arg))
+        {   arg_size = sizeof(void*);   }
 
         // DETERMINE PARAMETERS BASED ON ARG LOCATION //////////////////////////////////
-        U4 const dsts[Dst_Count] = {
+        int const dsts[Dst_Count] = {
             [Dst_reg] = Arg_I_Regs[dst_fn_arg_i],
-            [Dst_xmm] = dst_fn_arg_i,
-            [Dst_mem] = 8*dst_fn_arg_i,
+            [Dst_xmm] =            dst_fn_arg_i,
+            [Dst_mem] = 8 * dst_fn_arg_i,
         };
         BncVal const srcs[Src_Count] = {
             [Src_reg] = { .reg = Arg_I_Regs[src_fn_arg_i] },
@@ -398,15 +430,7 @@ make_bounce_fn(Byte *mem, void *target_fn, BncArg const args[], Size args_n)
         mc_size += Movs[dst][src](&cur, dsts[dst], srcs[src], Bnc_ax); // NOTE: ax is only used in mem_mem, where it's the tmp register
     }
 
-    if (args_n > 4)
-    { // NOTE: we have changed rsp, so we need control to return here to reset it
-        mc_size += call_fn(&cur, target_fn);
-        mc_size += mov_mem_mem(&cur, rsp_d, (BncVal){0}, Bnc_r11); // replace the return address // would it be better to just jmp to it?
-        mc_size += add_rsp(&cur, rsp_d);
-        mc_size += ret(&cur);
-    }
-    else
-    {   mc_size += jmp_fn(&cur, target_fn);   }
+    mc_size += jmp_or_call_and_cleanup(&cur, target_fn, rsp_d);
 
     result.size = data_size + mc_size;
     assert(!result.fn ||
@@ -415,7 +439,128 @@ make_bounce_fn(Byte *mem, void *target_fn, BncArg const args[], Size args_n)
 }
 
 #else // WIN32
+// LINUX
 
+internal BncFn
+make_bounce_fn(Byte *mem, void *target_fn, BncArg const args[], Size args_n)
+{
+#define assume_args_are_sorted
+    persist const BncReg Arg_I_Regs[] = { Bnc_di, Bnc_si, Bnc_dx, Bnc_cx, Bnc_r8, Bnc_r9, };
+
+    BncFn result = { .data = mem };
+    U4 mc_size = 0, data_size = 0, data_used = 0;
+
+    Size gen_fn_args_n = 0; // total
+    struct { int regs_n, xmms_n, stck_n; } gen_fn = {0}, tgt_fn = {0};
+    for (Size i = args_n; i-- > 0;)
+    {
+        BncArg arg = args[i];
+
+        if (!(arg.tag & Bnc_fix)) // count the number of args to be passed to the generated fn of each type
+        {   ((arg.tag & Bnc_float) ? ++gen_fn.xmms_n : ++gen_fn.regs_n);   }
+        ((arg.tag & Bnc_float)     ? ++tgt_fn.xmms_n : ++tgt_fn.regs_n);
+
+        bnc_copy_data_cache_size(NULL, result.data, &data_size, &arg);
+    }
+
+    Byte *cur = result.fn = (mem ? mem + data_size : 0); // make space for data before the executable
+
+    U4 rsp_d = 0, odd_stack;
+    { // determine space needed on stack (and bump rsp if needed)
+        int gen_stck_regs_n = (gen_fn.regs_n > countof(Arg_I_Regs) ? gen_fn.regs_n - countof(Arg_I_Regs) : 0);
+        int gen_stck_xmms_n = (gen_fn.xmms_n > Bnc_xmms_n          ? gen_fn.xmms_n - Bnc_xmms_n          : 0);
+        int tgt_stck_regs_n = (tgt_fn.regs_n > countof(Arg_I_Regs) ? tgt_fn.regs_n - countof(Arg_I_Regs) : 0);
+        int tgt_stck_xmms_n = (tgt_fn.xmms_n > Bnc_xmms_n          ? tgt_fn.xmms_n - Bnc_xmms_n          : 0);
+
+        gen_fn.stck_n = gen_stck_regs_n + gen_stck_xmms_n;
+        tgt_fn.stck_n = tgt_stck_regs_n + tgt_stck_xmms_n;
+        if (tgt_fn.stck_n > 0)
+        {
+            int stack_args_n = tgt_fn.stck_n - gen_fn.stck_n;
+            odd_stack = stack_args_n & 1;
+            mc_size += bnc_prep_stack(&cur, stack_args_n, &rsp_d);
+        }
+    }
+
+    int dst_arg_idxs[Dst_Count] = { [Dst_reg]=(tgt_fn.regs_n-1), [Dst_xmm]=(tgt_fn.xmms_n-1), [Dst_mem]=(tgt_fn.stck_n-1), };
+    int src_arg_idxs[Src_Count] = { [Src_reg]=(gen_fn.regs_n-1), [Src_xmm]=(gen_fn.xmms_n-1), [Src_mem]=(gen_fn.stck_n-1), };
+
+    // NOTE: go in reverse order to avoid clobbering args
+    for (Size dst_fn_arg_i = args_n; dst_fn_arg_i-- > 0;)
+    { // move args from a literal/generated position to their target position
+        BncArg arg      = args[dst_fn_arg_i];
+        U4     arg_size = (arg.tag & Bnc_size_mask) ?: 8; // NOTE: default 0 allows API users to not specify all args that haven't changed (as long as they're scalar)
+        int    is_float = !!(arg.tag & Bnc_float);
+
+        // COPY CACHED DATA ////////////////////////////////////////////////////////////
+        if (bnc_copy_data_cache_size(cur, result.data, &data_used, &arg))
+        {   arg_size = sizeof(void*);   } // now just a pointer to that data
+
+
+        // DETERMINE PARAMETERS BASED ON ARG LOCATION //////////////////////////////////
+        int const dsts[Dst_Count] = {
+            [Dst_reg] = Arg_I_Regs[dst_arg_idxs[Dst_reg]],
+            [Dst_xmm] =            dst_arg_idxs[Dst_xmm],
+            [Dst_mem] =   8 * (1 + dst_arg_idxs[Dst_mem]),
+        };
+        BncVal const srcs[Src_Count] = {
+            [Src_reg] = { .reg = Arg_I_Regs[src_arg_idxs[Src_reg]] },
+            [Src_xmm] = { .reg =            src_arg_idxs[Src_xmm] },
+            [Src_mem] = { .rU4 =   8 * (1 + src_arg_idxs[Src_mem]) },
+            [Src__U8] = arg.val,
+            [Src__F4] = arg.val,
+            [Src__F8] = arg.val,
+        };
+
+
+        // DETERMINE DEST & SRC LOCATIONS //////////////////////////////////////////////
+        BncSrcLoc src = (is_float ? Src_xmm : Src_reg);
+        BncDstLoc dst = (is_float ? Dst_xmm : Dst_reg);
+
+        if (arg.tag & Bnc_fix)
+        { // determine immediate source for fixde values
+            assert(arg_size <= 8, "unhandled arg size: %u", arg_size);
+            assert(!is_float || arg_size == 4 || arg_size == 8, "unhandled float size: %u", arg_size);
+            src = Imm_Locs[arg_size != 4][is_float];
+        }
+
+        persist const U4 Loc_Max[Src_Count] = { [Loc_xmm] = Bnc_xmms_n, [Loc_reg] = countof(Arg_I_Regs) };
+        // if we're over the number of regs, move onto the stack, marking a reg as used
+        if (Loc_Max[src] && src_arg_idxs[src] >= Loc_Max[src])
+        {   --src_arg_idxs[src], src = Src_mem;   }
+        if (Loc_Max[dst] && dst_arg_idxs[dst] >= Loc_Max[dst])
+        {   --dst_arg_idxs[dst], dst = Dst_mem;   }
+
+        // NOTE: needs full push rbp and full recreation of args, not partially reusing stack
+        //       alternatively we could just push 1 more onto the stack and use what was the bottom argument to store the rsp
+        //       we'd need to cache that value in e.g. r11 so that we could put it back on the stack in the right place for the new call
+        //       I think the reason this isn't needed on Winx64 is due to the shadow space
+        if (src == Src_mem || dst == Dst_mem)
+        {   TODO("Using arguments that spill onto the stack is currently unsupported on Linux");    }
+
+        // mark args as used, ready for next iteration
+        // NOTE: when the src is a literal, it will be subtracted from one of the elements in the src array that we don't care about
+        --src_arg_idxs[src];
+        --dst_arg_idxs[dst];
+
+
+        // MOV AS APPROPRIATE //////////////////////////////////////////////////////////
+        assert(dst && src);
+        mc_size += Movs[dst][src](&cur, dsts[dst], srcs[src], Bnc_ax); // NOTE: ax is only used in mem_mem, where it's the tmp register
+    }
+
+    assert(src_arg_idxs[Src_reg] == -1 && src_arg_idxs[Src_xmm] == -1 && src_arg_idxs[Src_mem] == -1 &&
+           dst_arg_idxs[Dst_reg] == -1 && dst_arg_idxs[Dst_xmm] == -1 && dst_arg_idxs[Dst_mem] == -1, "Not all args were applied");
+
+    mc_size += jmp_or_call_and_cleanup(&cur, target_fn, rsp_d);
+
+    result.size = data_size + mc_size;
+    assert(!result.fn ||
+           (cur == (mem + result.size)), "not calculating the pushed size correctly");
+    return result; // if we were passed a NULL, return the size, otherwise add nothing & return the start of the trampoline
+}
+
+// TODO: # error unhandled platform for generating trampolines
 #endif// WIN32
 
 
@@ -463,25 +608,28 @@ typedef struct MyData {
     float fs[6];
 } MyData;
 
-static float my_data_user(MyData data)
-{
-    return data.fs[3];
+static float my_data_user(MyData *data) {
+    return data->fs[3];
 }
-
-static Byte array_fn(Byte *arr, Size arr_n)
-{
+static Byte array_fn(Byte *arr, Size arr_n) {
     return arr[arr_n-1];
+}
+static F8 sub_F8(F8 a, F8 b) {
+    return a - b;
+}
+static F4 sub_F4(F4 a, F4 b) {
+    return a - b;
 }
 
 static void bnc_test()
 {
-    void *exe_buf = VirtualAlloc(NULL, 4096, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    void *exe_buf = os.alloc_pages(NULL, 4096, 1, Virt_reserve_commit);
     U8 res_6 = args_6(1,2,3,4,0x123456789abcd,6);
 
-    MyData data = { 42, .fs[3] = 6.28f };
-    F4 (*fn2)() = make_bounce_fn(exe_buf, my_data_user, ARRAY__N((BncArg[]) { bnc_struct(&data, sizeof(data)) })).fn;
-    F4 my_data_expect = my_data_user(data);
-    F4 my_data_actual = fn2();
+    MyData data           = { 42, .fs[3] = 6.28f };
+    F4     (*fn2)()       = make_bounce_fn(exe_buf, my_data_user, ARRAY__N((BncArg[]) { bnc_copy(&data, sizeof(data)) })).fn;
+    F4     my_data_expect = my_data_user(&data);
+    F4     my_data_actual = fn2();
 
 #define TEST(fmt, r, args, test_fn, array, expect, actual) do {\
     r (*fn) args = make_bounce_fn(exe_buf, test_fn, ARRAY__N(array)).fn; \
@@ -512,26 +660,26 @@ static void bnc_test()
              (a, b, c, d, e, f),
              (a, b, d, f));
 
-        TEST("%zu",U8,(U8, U8, U8, U8), args_7,
-             ((BncArg[]) { {8}, {8}, bnc_U8(c), {8}, bnc_U8(e), {8}, bnc_U8(g_)}),
-             (a, b, c, d, e, f, g_),
-             (a, b, d, f));
+        /* TEST("%zu",U8,(U8, U8, U8, U8), args_7, */
+             /* ((BncArg[]) { {8}, {8}, bnc_U8(c), {8}, bnc_U8(e), {8}, bnc_U8(g_)}), */
+             /* (a, b, c, d, e, f, g_), */
+             /* (a, b, d, f)); */
 
-        TEST("%zu",U8,(U8, U8, U8, U8), args_16,
-             ((BncArg[]) {
-              {Bnc_reg}, {Bnc_reg}, bnc_U8(c), {Bnc_reg}, bnc_U8(e), bnc_U8(f), bnc_U8(g_), bnc_U8(h),
-              bnc_U8(i), bnc_U8(j), bnc_U8(k), bnc_U8(l), bnc_U8(m), {Bnc_reg}, bnc_U8(o),  bnc_U8(p), }),
-             (a, b, c, d, e, f, g_, h,
-              i, j, k, l, m, n, o,  p),
-             (a, b, d, n));
+/*         TEST("%zu",U8,(U8, U8, U8, U8), args_16, */
+/*              ((BncArg[]) { */
+/*               {Bnc_reg}, {Bnc_reg}, bnc_U8(c), {Bnc_reg}, bnc_U8(e), bnc_U8(f), bnc_U8(g_), bnc_U8(h), */
+/*               bnc_U8(i), bnc_U8(j), bnc_U8(k), bnc_U8(l), bnc_U8(m), {Bnc_reg}, bnc_U8(o),  bnc_U8(p), }), */
+/*              (a, b, c, d, e, f, g_, h, */
+/*               i, j, k, l, m, n, o,  p), */
+/*              (a, b, d, n)); */
 
-        TEST("%zu",U8,(U8, U8, U8, U8), args_16,
-             ((BncArg[]) {
-              [2]=bnc_U8(c), [4]=bnc_U8(e), [5]=bnc_U8(f),  [6]=bnc_U8(g_), [7]=bnc_U8(h),
-              [8]=bnc_U8(i), [9]=bnc_U8(j), [10]=bnc_U8(k), [11]=bnc_U8(l), [12]=bnc_U8(m), [14]=bnc_U8(o), [15]=bnc_U8(p), }),
-             (a, b, c, d, e, f, g_, h,
-              i, j, k, l, m, n, o,  p),
-             (a, b, d, n));
+/*         TEST("%zu",U8,(U8, U8, U8, U8), args_16, */
+/*              ((BncArg[]) { */
+/*               [2]=bnc_U8(c), [4]=bnc_U8(e), [5]=bnc_U8(f),  [6]=bnc_U8(g_), [7]=bnc_U8(h), */
+/*               [8]=bnc_U8(i), [9]=bnc_U8(j), [10]=bnc_U8(k), [11]=bnc_U8(l), [12]=bnc_U8(m), [14]=bnc_U8(o), [15]=bnc_U8(p), }), */
+/*              (a, b, c, d, e, f, g_, h, */
+/*               i, j, k, l, m, n, o,  p), */
+/*              (a, b, d, n)); */
 
         /* U8 (*fn2)(U8, U8, U8, U8) = make_bounce_fn( */
         /*     exe_buf, args_16, ARRAY__N((BncArg[]) { */
@@ -541,6 +689,42 @@ static void bnc_test()
         /* U8 res2 = fn2(a, b, d, n); */
 
         int stop = 0;
+    }
+    {
+        /* FnA *fn = exe_jmp_fn(exe_buf, (U8)&get_val); */
+        /* U8 jmp_val = fn(); */
+
+        /* FnA *sq_3 = exe_param_1(exe_buf, &square, 3); */
+        /* U4   val  = sq_3(); */
+
+        typedef int Fn_int_int(int);
+        BncArg      sub_1_args[] = { {Bnc_reg}, bnc_U8(1) };
+        BncFn       sub_1_bnc    = make_bounce_fn(NULL, sub, ARRAY__N(sub_1_args));
+        void       *sub_1_mem    = os.alloc_pages(NULL, sub_1_bnc.size, 1, Virt_reserve_commit);
+        Fn_int_int *sub_1        = make_bounce_fn(sub_1_mem, sub, ARRAY__N(sub_1_args)).fn;
+        int sub_3_1 = sub_1(3);
+        int sub_5_1 = sub_1(5);
+
+        Fn_int_int *sub_from_6 = make_bounce_fn(exe_buf, sub, ARRAY__N((BncArg[]){  bnc_U8(6), {Bnc_reg}, })).fn;
+
+        int sub_6_1 = sub_from_6(1);
+        int sub_6_3 = sub_from_6(3);
+
+        F8 f = sub_F8(6.28f, 3.14f);
+
+        /* typedef F8 Fn_F8_F8(F8); */
+        /* Fn_F8_F8 *sub_tau      = make_bounce_fn(exe_buf, sub_F8, ARRAY__N((BncArg[]){  spec_arg(SpecArg_F8), spec_F8(6.28), })).fn; */
+        /* F8 sub_tau_36_28       = sub_tau(36.28); */
+
+        /* Fn_F8_F8 *sub_from_tau = make_bounce_fn(exe_buf, sub_F8, ARRAY__N((BncArg[]){  spec_F8(6.28), spec_arg(SpecArg_F8), })).fn; */
+        /* F8 sub_from_tau_36_28  = sub_from_tau(36.28); */
+
+        typedef F4 Fn_F4_F4(F4);
+        Fn_F4_F4 *sub_tau      = make_bounce_fn(exe_buf, sub_F4, ARRAY__N((BncArg[]){  {Bnc_float | sizeof(F4)}, bnc_F4(6.28f), })).fn;
+        F4 sub_tau_36_28       = sub_tau(36.28f);
+
+        Fn_F4_F4 *sub_from_tau = make_bounce_fn(exe_buf, sub_F4, ARRAY__N((BncArg[]){  bnc_F4(6.28f), {Bnc_float | sizeof(F4)}, })).fn;
+        F4 sub_from_tau_36_28  = sub_from_tau(36.28f);
     }
 
 
