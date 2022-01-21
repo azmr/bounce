@@ -231,7 +231,7 @@ internal inline Size sub_rsp(Byte **cur, Size size)
     // this way we get to pass 1 more parameter in 1 byte
     if (size < 0x80)
     {
-        Byte mc[] = { 0x48, 0x83, 0xc4, (Byte)-(S1)size }; // add rsp -size
+        Byte mc[] = { 0x48, 0x83, 0xc4, (Byte){-(S1)size} }; // add rsp -size
         return mc_cpy(cur, mc, sizeof(mc));
     }
 
@@ -246,7 +246,7 @@ internal inline Size add_rsp(Byte **cur, Size size)
     // this way we get to pass 1 more parameter in 1 byte
     if (size <= 0x80)
     {
-        Byte mc[] = { 0x48, 0x83, 0xec, (Byte)-(S1)size }; // sub rsp -size
+        Byte mc[] = { 0x48, 0x83, 0xec, (Byte){-(S1)size} }; // sub rsp -size
         return mc_cpy(cur, mc, sizeof(mc));
     }
 
@@ -258,7 +258,7 @@ internal inline Size jmp_fn(Byte **cur, void *fn)
 {
     Size mc_size = mov_reg_imm(cur, Bnc_ax, (BncVal){.ptr=fn}, 0); // mov rax, fn
     if (*cur)
-    {   cur[0][0]=0xff, cur[0][1]=0xe0; *cur += 2;   } // jmp rax
+    {   cur[0][0].val=0xff, cur[0][1].val=0xe0; *cur += 2;   } // jmp rax
     return mc_size + 2;
 }
 
@@ -266,13 +266,13 @@ internal inline Size call_fn(Byte **cur, void *fn)
 {
     Size mc_size = mov_reg_imm(cur, Bnc_ax, (BncVal){.ptr=fn}, 0); // mov rax, fn
     if (*cur)
-    {   cur[0][0]=0xff, cur[0][1]=0xd0; *cur += 2;   } // call rax
+    {   cur[0][0].val=0xff, cur[0][1].val=0xd0; *cur += 2;   } // call rax
     return mc_size + 2;
 }
 
 internal inline Size ret(Byte **cur)
 {
-    if (*cur) { **cur = 0xc3; ++*cur; } // ret
+    if (*cur) { cur[0][0].val = 0xc3; ++*cur; } // ret
     return 1;
 }
 
