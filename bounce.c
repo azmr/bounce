@@ -623,7 +623,7 @@ static F4 sub_F4(F4 a, F4 b) {
 
 static void bnc_test()
 {
-    void *exe_buf = os.alloc_pages(NULL, 4096, 1, Virt_reserve_commit);
+    void *exe_buf = os.alloc_pages(NULL, 4096, Mem_exec);
     U8 res_6 = args_6(1,2,3,4,0x123456789abcd,6);
 
     MyData data           = { 42, .fs[3] = 6.28f };
@@ -701,7 +701,7 @@ static void bnc_test()
         typedef int Fn_int_int(int);
         BncArg      sub_1_args[] = { {Bnc_reg}, bnc_U8(1) };
         BncFn       sub_1_bnc    = make_bounce_fn(NULL, sub, ARRAY__N(sub_1_args));
-        void       *sub_1_mem    = os.alloc_pages(NULL, sub_1_bnc.size, 1, Virt_reserve_commit);
+        void       *sub_1_mem    = os.alloc_pages(NULL, sub_1_bnc.size, Mem_exec);
         Fn_int_int *sub_1        = make_bounce_fn(sub_1_mem, sub, ARRAY__N(sub_1_args)).fn;
         int sub_3_1 = sub_1(3);
         int sub_5_1 = sub_1(5);
