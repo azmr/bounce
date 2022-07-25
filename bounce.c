@@ -730,4 +730,5 @@ static void bnc_test()
 
 
     int stop2 = 0;
+#undef TEST
 }
